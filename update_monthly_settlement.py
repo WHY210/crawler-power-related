@@ -15,7 +15,7 @@ def fetch_one_day(date_str: str, sleep_sec: float = 0.3):
     obj = resp.json()
 
     data = obj.get("data")
-    if not isinstance(data, list) or len(data) compiling != 24:
+    if not isinstance(data, list) or len(data) != 24:
         raise ValueError(f"{date_str} unexpected data format")
 
     rows = []
