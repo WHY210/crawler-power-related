@@ -1,0 +1,4 @@
+﻿feeder_id,ym,season2,bucket2,kwh,cost_ntd
+DEFAULT_FEEDER,2026-01,nonsummer,offpeak,6076.27,14947.6242
+DEFAULT_FEEDER,2026-01,nonsummer,peak,8400.08,53508.5096
+DEFAULT_FEEDER,2026-01,nonsummer,sat_semipeak,2285.54,5805.2716
