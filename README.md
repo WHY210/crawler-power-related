@@ -5,8 +5,8 @@ This project provides a comprehensive crawler for fetching power-related data, i
 - Taipower generation （[台電機組過去發電量](https://data.gov.tw/dataset/37331)）
 - Taipower flow data （[電力潮流](https://data.gov.tw/en/datasets/37326)）
 - Taipower ancillary services settlement data（[日前輔助市場歷史結清價格與交易量](https://etp.taipower.com.tw/web/service_market/historical_settlement_trading)）
-- NTU buildings demand（[台大數位電錶 *需在台大網域](https://epower.ga.ntu.edu.tw/?fbclid=IwAR1_crXmTrEojnqGZCh6z2hesnkZ1Bsd7YBEnyAyzEyHOoIvr-xjA8sBAqo)）
-- NTU meters (not complete yet)
+- NTU buildings demand（[台大校園數位電錶監視系統 *需在台大網域](https://epower.ga.ntu.edu.tw/?fbclid=IwAR1_crXmTrEojnqGZCh6z2hesnkZ1Bsd7YBEnyAyzEyHOoIvr-xjA8sBAqo)）
+- NTU meters (not complete yet) （[台大校園數位電錶監視系統 *需在台大網域](https://epower.ga.ntu.edu.tw/?fbclid=IwAR1_crXmTrEojnqGZCh6z2hesnkZ1Bsd7YBEnyAyzEyHOoIvr-xjA8sBAqo)）
 
 ## Run
 
