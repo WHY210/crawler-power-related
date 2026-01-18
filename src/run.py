@@ -1,5 +1,11 @@
 import os
 import requests
+try:
+    from meter_config import meter_name_map
+except ImportError:
+    # Fallback if run from different context
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from meter_config import meter_name_map
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, date
@@ -153,149 +159,185 @@ def update_settlement(force_start=None, force_end=None):
 
     print(">>> Settlement Update Finished.")
 
+# Load Taipower CSV for mapping
+try:
+    # Use absolute path or assume run from root
+    csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '台大台電獨立電號表.csv')
+    if not os.path.exists(csv_path):
+        # Try local (if running from root)
+        csv_path = '台大台電獨立電號表.csv'
+        
+    taipower_df = pd.read_csv(csv_path, low_memory=False)
+    # Normalize for matching
+    taipower_df['match_name'] = taipower_df['館舍名稱'].fillna('').astype(str).str.replace('台', '臺').str.replace(r'[() ]', '', regex=True)
+    taipower_df['match_loc'] = taipower_df['地點'].fillna('').astype(str).str.replace('台', '臺').str.replace(r'[() ]', '', regex=True)
+except Exception as e:
+    print(f"Warning: Could not load mapping CSV: {e}")
+    taipower_df = pd.DataFrame()
+
+def get_taipower_info(building_name):
+    if taipower_df.empty:
+        return "Unknown_Campus", "Unknown_Feeder", get_building_category(building_name)
+    
+    clean_name = building_name.replace('-', '').replace('台', '臺').replace(' ', '').replace('(', '').replace(')', '')
+    
+    # Priority 1: Match Name
+    for _, row in taipower_df.iterrows():
+        if clean_name in row['match_name']:
+             return row['校區別'], row['饋線代號'], row['科目']
+    
+    # Priority 2: Match Location
+    for _, row in taipower_df.iterrows():
+        if clean_name in row['match_loc']:
+             return row['校區別'], row['饋線代號'], row['科目']
+             
+    return "Unknown_Campus", "Unknown_Feeder", get_building_category(building_name)
+
 def update_buildings(force_start=None, force_end=None):
     print(">>> Updating Buildings...")
     
     # Base directory for aggregated output
-    base_dir = "data/ntu_power"
+    base_dir = "data/ntu_building"
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
         
     today = datetime.now()
     yesterday = today - timedelta(days=1)
     
-    # Group buildings by category to minimize file I/O
-    category_buildings = {}
+    # Flatten the list of buildings
+    all_buildings = []
     for ctg, building_list in buildings_dict.items():
         for b_val in building_list:
-            category = get_building_category(b_val)
-            if category not in category_buildings:
-                category_buildings[category] = []
-            category_buildings[category].append((b_val, ctg)) # store (building_name, n_code)
+            all_buildings.append((b_val, ctg)) # b_val is name, ctg is N code
 
-    # Process by category
-    for category, b_list in category_buildings.items():
-        print(f"Processing Category: {category}")
-        file_path = os.path.join(base_dir, f"{category}.csv")
+    # Process each building individually
+    for b_val, ctg in all_buildings:
+        # Determine path
+        campus, feeder, subject = get_taipower_info(b_val)
         
-        # Load Aggregated DataFrame
-        df_cat = pd.DataFrame()
+        # Clean up path components
+        def clean_path_comp(s):
+            return str(s).strip().replace('/', '_') if pd.notna(s) else "Unknown"
+            
+        campus = clean_path_comp(campus)
+        feeder = clean_path_comp(feeder)
+        subject = clean_path_comp(subject)
+        
+        # Determine specific save directory
+        save_dir = os.path.join(base_dir, campus, feeder, subject)
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+            
+        file_path = os.path.join(save_dir, f"{b_val}.csv")
+        
+        # Load existing data
+        df_building = pd.DataFrame()
         if os.path.exists(file_path):
             try:
-                df_cat = pd.read_csv(file_path)
-                if 'Datetime' in df_cat.columns:
-                    df_cat['Datetime'] = pd.to_datetime(df_cat['Datetime'])
-                    df_cat.set_index('Datetime', inplace=True)
+                df_building = pd.read_csv(file_path)
+                if 'Datetime' in df_building.columns:
+                    df_building['Datetime'] = pd.to_datetime(df_building['Datetime'])
+                    df_building.set_index('Datetime', inplace=True)
             except Exception as e:
                 print(f"Error reading {file_path}: {e}")
+
+        # Determine start date
+        start_date = None
+        end_date = None
         
-        for b_val, ctg in b_list:
-            # Determine start date
-            start_date = None
-            end_date = None
-            
-            if force_start and force_end:
-                start_date = datetime.strptime(force_start, "%Y-%m-%d")
-                end_date = datetime.strptime(force_end, "%Y-%m-%d")
-            else:
-                # Check last date for this specific building in the aggregated DF
-                if not df_cat.empty and b_val in df_cat.columns:
-                    # Get the last valid index for this column
-                    valid_idx = df_cat[b_val].last_valid_index()
-                    if valid_idx:
-                         start_date = valid_idx + timedelta(days=1)
-                         start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-                    else:
-                         start_date = datetime(today.year, 1, 1)
+        if force_start and force_end:
+            start_date = datetime.strptime(force_start, "%Y-%m-%d")
+            end_date = datetime.strptime(force_end, "%Y-%m-%d")
+        else:
+            if not df_building.empty:
+                valid_idx = df_building.last_valid_index()
+                if valid_idx:
+                     start_date = valid_idx + timedelta(days=1)
+                     start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
                 else:
                      start_date = datetime(today.year, 1, 1)
-                
-                end_date = yesterday
-                
-                if start_date.date() > end_date.date():
-                    continue
-
-            print(f"Fetching {category}/{b_val} from {start_date.strftime('%Y/%m/%d')} to {end_date.strftime('%Y/%m/%d')}")
+            else:
+                 start_date = datetime(today.year, 1, 1)
             
-            try:
-                date_range_list = pd.date_range(start=start_date, end=end_date, freq='D').strftime("%Y/%m/%d").tolist()
-                data_output = []
-                
-                for d in date_range_list:
-                    url = 'https://epower.ga.ntu.edu.tw/fn4/report2.aspx'
-                    payload = {
-                        'ctg': ctg,
-                        'dt1': d,
-                        'ok': '確定',
-                    }
-                    try:
-                        read_url = requests.post(url, data=payload)
-                        dfs = pd.read_html(StringIO(read_url.text))
-                        if len(dfs) > 1:
-                            data = dfs[1]
-                            data_temp = data.copy()
-                            data_temp.columns = data_temp.iloc[1]
-                            data_temp = data_temp.iloc[3:27]
-                            if b_val in data_temp.columns:
-                                data_temp = data_temp[b_val]
-                                data_temp = [float(val) if val != '---' else np.nan for val in data_temp]
-                                data_output += data_temp
-                            else:
-                                print(f"Warning: {b_val} not in response for {d}")
-                                data_output += [np.nan] * 24
-                        else:
-                            print(f"Warning: Unexpected HTML structure for {b_val} on {d}")
-                            data_output += [np.nan] * 24
-                    except Exception as req_e:
-                        print(f"Request failed for {b_val} on {d}: {req_e}")
-                        data_output += [np.nan] * 24
-                    
-                    time.sleep(0.05)
-                
-                # Create Series for new data
-                new_idx = pd.date_range(start=start_date, end=end_date + timedelta(hours=23), freq='h')
-                
-                if len(data_output) != len(new_idx):
-                     # print(f"Warning: Length mismatch for {b_val}. Padding with NaNs.")
-                     if len(data_output) < len(new_idx):
-                         data_output.extend([np.nan] * (len(new_idx) - len(data_output)))
-                     else:
-                         data_output = data_output[:len(new_idx)]
-                
-                new_series = pd.Series(data_output, index=new_idx, name=b_val)
-                
-                # Merge into df_cat
-                if df_cat.empty:
-                    df_cat = pd.DataFrame(new_series)
-                    df_cat.index.name = 'Datetime'
-                else:
-                    # Update or Append
-                    # Combine indices
-                    combined_idx = df_cat.index.union(new_idx).sort_values()
-                    df_cat = df_cat.reindex(combined_idx)
-                    if b_val not in df_cat.columns:
-                        df_cat[b_val] = np.nan
-                    
-                    # Direct assignment for the new range
-                    df_cat.loc[new_idx, b_val] = new_series
+            end_date = yesterday
+            
+            if start_date.date() > end_date.date():
+                continue
 
-                print(f"Updated {b_val}")
-
-            except Exception as e:
-                print(f"Failed to process {b_val}: {e}")
+        print(f"Fetching {b_val} from {start_date.strftime('%Y/%m/%d')} to {end_date.strftime('%Y/%m/%d')}")
         
-        # Save Category Data
-        if not df_cat.empty:
-            df_cat.sort_index(inplace=True)
-            df_cat.reset_index(inplace=True)
-            df_cat.to_csv(file_path, index=False)
-            print(f"Saved {category} aggregated data.")
+        try:
+            date_range_list = pd.date_range(start=start_date, end=end_date, freq='D').strftime("%Y/%m/%d").tolist()
+            data_output = []
+            
+            for d in date_range_list:
+                url = 'https://epower.ga.ntu.edu.tw/fn4/report2.aspx'
+                payload = {
+                    'ctg': ctg,
+                    'dt1': d,
+                    'ok': '確定',
+                }
+                try:
+                    read_url = requests.post(url, data=payload)
+                    dfs = pd.read_html(StringIO(read_url.text))
+                    if len(dfs) > 1:
+                        data = dfs[1]
+                        data_temp = data.copy()
+                        data_temp.columns = data_temp.iloc[1]
+                        data_temp = data_temp.iloc[3:27]
+                        if b_val in data_temp.columns:
+                            data_temp = data_temp[b_val]
+                            data_temp = [float(val) if val != '---' else np.nan for val in data_temp]
+                            data_output += data_temp
+                        else:
+                            # print(f"Warning: {b_val} not in response for {d}")
+                            data_output += [np.nan] * 24
+                    else:
+                        # print(f"Warning: Unexpected HTML structure for {b_val} on {d}")
+                        data_output += [np.nan] * 24
+                except Exception as req_e:
+                    print(f"Request failed for {b_val} on {d}: {req_e}")
+                    data_output += [np.nan] * 24
+                
+                time.sleep(0.05)
+            
+            # Create Series/DataFrame for new data
+            new_idx = pd.date_range(start=start_date, end=end_date + timedelta(hours=23), freq='h')
+            
+            if len(data_output) != len(new_idx):
+                 if len(data_output) < len(new_idx):
+                     data_output.extend([np.nan] * (len(new_idx) - len(data_output)))
+                 else:
+                     data_output = data_output[:len(new_idx)]
+            
+            new_series = pd.Series(data_output, index=new_idx, name=b_val)
+            new_df = pd.DataFrame(new_series)
+            new_df.index.name = 'Datetime'
+            
+            # Merge
+            if df_building.empty:
+                df_building = new_df
+            else:
+                combined_idx = df_building.index.union(new_idx).sort_values()
+                df_building = df_building.reindex(combined_idx)
+                if b_val not in df_building.columns:
+                    df_building[b_val] = np.nan
+                df_building.loc[new_idx, b_val] = new_series
+
+            # Save Building Data
+            df_building.sort_index(inplace=True)
+            df_building.reset_index(inplace=True)
+            df_building.to_csv(file_path, index=False)
+            print(f"Saved {b_val} to {save_dir}")
+
+        except Exception as e:
+            print(f"Failed to process {b_val}: {e}")
 
     print(">>> Buildings Update Finished.")
 
 def update_meters(force_start=None, force_end=None):
     print(">>> Updating Meters...")
-    path = "data/ntu_power"
+    path = "data/ntu_meter"
     if not os.path.exists(path):
         os.makedirs(path)
         
@@ -313,8 +355,17 @@ def update_meters(force_start=None, force_end=None):
     # Filter dates to not go beyond today
     valid_dates = [d for d in dates if d <= today_date]
     
-    for meter in arrmeter:
-        file_path = os.path.join(path, f"{meter}_{year}.xlsx") # Added year to filename
+    # Use the map to iterate if available, otherwise fallback to arrmeter
+    if 'meter_name_map' in globals():
+        meters_to_process = meter_name_map.items()
+    else:
+        print("Warning: meter_name_map not found. Using raw codes.")
+        meters_to_process = [(m, m) for m in arrmeter]
+
+    for meter, meter_name in meters_to_process:
+        # Sanitize filename
+        safe_name = str(meter_name).replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
+        file_path = os.path.join(path, f"{safe_name}_{year}.xlsx") # Added year to filename
         
         # Check if we should skip?
         # If file exists, we will OVERWRITE it for the current year to ensure latest data is included.
@@ -352,7 +403,7 @@ def update_meters(force_start=None, force_end=None):
             # print(f"Meter {meter} up to date.")
             continue
             
-        print(f"Processing meter {meter} from day {days_processed}...")
+        print(f"Processing meter {meter_name} ({meter}) from day {days_processed}...")
         
         newly_fetched = []
 
