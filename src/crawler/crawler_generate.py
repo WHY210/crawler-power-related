@@ -23,11 +23,6 @@ proc_flow_dir = os.path.join(root_dir, "data", "taipower_flow")
 os.makedirs(raw_gen_dir, exist_ok=True)
 os.makedirs(raw_flow_dir, exist_ok=True)
 
-# Generate timestamped filenames
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-raw_filename1 = os.path.join(raw_gen_dir, f"raw_generator_{timestamp}.json")
-raw_filename2 = os.path.join(raw_flow_dir, f"raw_flow_{timestamp}.json")
-
 # Temp filenames for processing
 temp_filename1 = os.path.join(proc_gen_dir, "temp_download.json")
 temp_filename2 = os.path.join(proc_flow_dir, "temp_download.json")
@@ -41,13 +36,9 @@ print("START")
 try:
     response = requests.get(url1, verify=False)
     if response.status_code == 200:
-        # Save raw
-        with open(raw_filename1, "wb") as file:
+        # Save directly to temp for processing
+        with open(temp_filename1, "wb") as file:
             file.write(response.content)
-        print(f"Generator raw data saved to {raw_filename1}")
-        
-        # Copy to temp for processing
-        shutil.copy(raw_filename1, temp_filename1)
         print(f"Generator data ready for processing at {temp_filename1}")
     else:
         print(f"Generator download failed: {response.status_code}")
@@ -58,13 +49,9 @@ except Exception as e:
 try:
     response = requests.get(url2, verify=False)
     if response.status_code == 200:
-        # Save raw
-        with open(raw_filename2, "wb") as file:
+        # Save directly to temp for processing
+        with open(temp_filename2, "wb") as file:
             file.write(response.content)
-        print(f"Flow raw data saved to {raw_filename2}")
-        
-        # Copy to temp for processing
-        shutil.copy(raw_filename2, temp_filename2)
         print(f"Flow data ready for processing at {temp_filename2}")
     else:
         print(f"Flow download failed: {response.status_code}")
