@@ -1,5 +1,8 @@
 import os
 import requests
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
+warnings.filterwarnings('ignore', category=InsecureRequestWarning)
 try:
     from meter_config import meter_name_map
 except ImportError:
@@ -210,8 +213,14 @@ def update_buildings(force_start=None, force_end=None):
         for b_val in building_list:
             all_buildings.append((b_val, ctg)) # b_val is name, ctg is N code
 
+    total_buildings = len(all_buildings)
+    print(f"Total buildings to process: {total_buildings}")
+
     # Process each building individually
-    for b_val, ctg in all_buildings:
+    for i, (b_val, ctg) in enumerate(all_buildings, 1):
+        # Progress indicator
+        print(f"\r[{i}/{total_buildings}] Processing {b_val}...", end="", flush=True)
+
         # Determine path
         campus, feeder, subject = get_taipower_info(b_val)
         
@@ -239,7 +248,7 @@ def update_buildings(force_start=None, force_end=None):
                     df_building['Datetime'] = pd.to_datetime(df_building['Datetime'])
                     df_building.set_index('Datetime', inplace=True)
             except Exception as e:
-                print(f"Error reading {file_path}: {e}")
+                print(f"\nError reading {file_path}: {e}")
 
         # Determine start date
         start_date = None
@@ -264,8 +273,6 @@ def update_buildings(force_start=None, force_end=None):
             if start_date.date() > end_date.date():
                 continue
 
-        print(f"Fetching {b_val} from {start_date.strftime('%Y/%m/%d')} to {end_date.strftime('%Y/%m/%d')}")
-        
         try:
             date_range_list = pd.date_range(start=start_date, end=end_date, freq='D').strftime("%Y/%m/%d").tolist()
             data_output = []
@@ -290,13 +297,10 @@ def update_buildings(force_start=None, force_end=None):
                             data_temp = [float(val) if val != '---' else np.nan for val in data_temp]
                             data_output += data_temp
                         else:
-                            # print(f"Warning: {b_val} not in response for {d}")
                             data_output += [np.nan] * 24
                     else:
-                        # print(f"Warning: Unexpected HTML structure for {b_val} on {d}")
                         data_output += [np.nan] * 24
                 except Exception as req_e:
-                    print(f"Request failed for {b_val} on {d}: {req_e}")
                     data_output += [np.nan] * 24
                 
                 time.sleep(0.05)
@@ -328,12 +332,11 @@ def update_buildings(force_start=None, force_end=None):
             df_building.sort_index(inplace=True)
             df_building.reset_index(inplace=True)
             df_building.to_csv(file_path, index=False)
-            print(f"Saved {b_val} to {save_dir}")
 
         except Exception as e:
-            print(f"Failed to process {b_val}: {e}")
+            print(f"\nFailed to process {b_val}: {e}")
 
-    print(">>> Buildings Update Finished.")
+    print("\n>>> Buildings Update Finished.")
 
 def update_meters(force_start=None, force_end=None):
     print(">>> Updating Meters...")
@@ -357,12 +360,15 @@ def update_meters(force_start=None, force_end=None):
     
     # Use the map to iterate if available, otherwise fallback to arrmeter
     if 'meter_name_map' in globals():
-        meters_to_process = meter_name_map.items()
+        meters_to_process = list(meter_name_map.items())
     else:
         print("Warning: meter_name_map not found. Using raw codes.")
         meters_to_process = [(m, m) for m in arrmeter]
 
-    for meter, meter_name in meters_to_process:
+    total_meters = len(meters_to_process)
+    print(f"Total meters to process: {total_meters}")
+
+    for i, (meter, meter_name) in enumerate(meters_to_process, 1):
         # Sanitize filename
         safe_name = str(meter_name).replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
         file_path = os.path.join(path, f"{safe_name}_{year}.xlsx") # Added year to filename
@@ -399,21 +405,20 @@ def update_meters(force_start=None, force_end=None):
                  pass
         
         days_processed = int(start_idx / 24)
+        
+        # Progress
+        print(f"\r[{i}/{total_meters}] Processing {safe_name} (Day {days_processed})...", end="", flush=True)
+
         if days_processed >= len(valid_dates):
-            # print(f"Meter {meter} up to date.")
             continue
             
-        print(f"Processing meter {meter_name} ({meter}) from day {days_processed}...")
-        
-        newly_fetched = []
-
         try:
-            for i in range(days_processed, len(valid_dates), step_size):
-                time1 = dates[i] + " 00:00"
-                end_idx = min(i + step_size - 1, len(valid_dates) - 1)
+            for i_d in range(days_processed, len(valid_dates), step_size):
+                time1 = dates[i_d] + " 00:00"
+                end_idx = min(i_d + step_size - 1, len(valid_dates) - 1)
                 
                 # If we reached the end of valid dates
-                if i > len(valid_dates) - 1:
+                if i_d > len(valid_dates) - 1:
                     break
                     
                 time2 = dates[end_idx] + " 23:00"
@@ -432,16 +437,15 @@ def update_meters(force_start=None, force_end=None):
                         data = dfs[1]
                         electric_use_temp = data.iloc[:,3].tolist()[1:]
                         electric_use.extend(electric_use_temp)
-                        newly_fetched.extend(electric_use_temp)
                     else:
                         # Append -1s if missing
-                        expected_hours = (end_idx - i + 1) * 24
+                        expected_hours = (end_idx - i_d + 1) * 24
                         electric_use.extend([-1] * expected_hours)
-                        newly_fetched.extend([-1] * expected_hours)
                 except Exception as e:
-                    print(f"Error fetching {meter} {time1}-{time2}: {e}")
-                    # expected_hours = (end_idx - i + 1) * 24
+                    # print(f"Error fetching {meter} {time1}-{time2}: {e}")
+                    # expected_hours = (end_idx - i_d + 1) * 24
                     # electric_use.extend([-1] * expected_hours)
+                    pass
                 
                 time.sleep(0.05)
             
@@ -453,9 +457,9 @@ def update_meters(force_start=None, force_end=None):
             data_df.to_excel(file_path, index=False)
             
         except Exception as e:
-            print(f"Failed meter {meter}: {e}")
+            print(f"\nFailed meter {meter}: {e}")
 
-    print(">>> Meters Update Finished.")
+    print("\n>>> Meters Update Finished.")
 
 def update_ntu_pv():
     print(">>> Updating NTU PV...")
