@@ -276,19 +276,34 @@ class BuildingDataManager:
         self.modified.add(key)
 
     def save_all(self):
-        print(f"\nSaving {len(self.modified)} merged files...")
-        for key in self.modified:
+        # Save files that have been modified and clear them from the list
+        # Using a list copy to iterate allows us to modify the set safely
+        keys_to_save = list(self.modified)
+        if not keys_to_save:
+            return
+
+        for key in keys_to_save:
             file_path = self._get_file_path(key)
             df = self.cache[key]
+            # Ensure sort and reset index
             df.sort_index(inplace=True)
-            df.reset_index(inplace=True)
-            df.to_csv(file_path, index=False)
-        print("Save complete.")
+            # We must be careful not to reset index multiple times if it's already a column
+            # But here we are dumping to CSV, so we reset to get 'Datetime' as a column
+            # To avoid issues, we write a copy or handle reset carefully. 
+            # safe approach: copy for export
+            export_df = df.reset_index()
+            export_df.to_csv(file_path, index=False)
+            
+            # Mark as saved
+            self.modified.discard(key)
 
 def update_buildings(force_start=None, force_end=None):
-    print(">>> Updating Buildings...")
+    print(">>> Updating Buildings (Parallel - Max 3)...")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Lock
     
     manager = BuildingDataManager()
+    manager_lock = Lock() # Protects manager's internal cache and file I/O
         
     today = datetime.now()
     yesterday = today - timedelta(days=1)
@@ -297,16 +312,17 @@ def update_buildings(force_start=None, force_end=None):
     all_buildings = []
     for ctg, building_list in buildings_dict.items():
         for b_val in building_list:
-            all_buildings.append((b_val, ctg)) # b_val is name, ctg is N code
+            all_buildings.append((b_val, ctg))
 
     total_buildings = len(all_buildings)
     print(f"Total buildings to process: {total_buildings}")
+    
+    # Counter for progress display
+    processed_count = 0
+    print_lock = Lock()
 
-    # Process each building individually
-    for i, (b_val, ctg) in enumerate(all_buildings, 1):
-        # Progress indicator
-        print(f"\r[{i}/{total_buildings}] Processing {b_val}...", end="", flush=True)
-
+    def process_single_building(b_val, ctg):
+        request_sleep_interval = 0.01 # Configurable sleep interval for requests
         # Determine grouping info
         campus, feeder, subject = get_taipower_info(b_val)
         
@@ -314,11 +330,15 @@ def update_buildings(force_start=None, force_end=None):
         start_date = None
         end_date = None
         
+        # Step 1: Determine Date Range (Read-only logic, no lock needed yet)
         if force_start and force_end:
             start_date = datetime.strptime(force_start, "%Y-%m-%d")
             end_date = datetime.strptime(force_end, "%Y-%m-%d")
         else:
-            last_date = manager.get_last_date(campus, feeder, subject, b_val)
+            # Need lock to safely read last date from manager
+            with manager_lock:
+                last_date = manager.get_last_date(campus, feeder, subject, b_val)
+            
             if last_date:
                  start_date = last_date + timedelta(days=1)
                  start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -327,61 +347,105 @@ def update_buildings(force_start=None, force_end=None):
             
             end_date = yesterday
             
-            if start_date.date() > end_date.date():
+        if start_date.date() > end_date.date():
+            return # Up to date
+
+        # Step 2: Get Snapshot of Existing Data (Critical Section)
+        # We copy the relevant data so we can check it without holding the lock during network requests
+        existing_df_snapshot = None
+        with manager_lock:
+            manager.load(campus, feeder, subject)
+            key = manager._get_key(campus, feeder, subject)
+            if key in manager.cache and not manager.cache[key].empty:
+                # Shallow copy of the DF is enough if we don't modify structure, 
+                # but deep copy is safer for multi-threaded reads if cache might change.
+                existing_df_snapshot = manager.cache[key].copy()
+
+        date_range_objs = pd.date_range(start=start_date, end=end_date, freq='D')
+        
+        # Use a dictionary to store ONLY newly fetched data: {timestamp: value}
+        new_data_dict = {}
+        
+        # Step 3: Loop dates and Fetch (Slow part - Run in parallel)
+        for d_obj in date_range_objs:
+            d_str = d_obj.strftime("%Y-%m-%d")
+            
+            # Check existing snapshot
+            skipped = False
+            if existing_df_snapshot is not None and not existing_df_snapshot.empty and b_val in existing_df_snapshot.columns:
+                try:
+                    day_slice = existing_df_snapshot.loc[d_obj.strftime("%Y-%m-%d")]
+                    if b_val in day_slice:
+                        vals = day_slice[b_val]
+                        if isinstance(vals, pd.Series) and len(vals) == 24 and not vals.isna().any():
+                            skipped = True
+                except KeyError:
+                    pass 
+            
+            if skipped:
                 continue
 
-        try:
-            date_range_list = pd.date_range(start=start_date, end=end_date, freq='D').strftime("%Y/%m/%d").tolist()
-            data_output = []
+            # Fetch from web
+            url = 'https://epower.ga.ntu.edu.tw/fn4/report2.aspx'
+            payload = {
+                'ctg': ctg,
+                'dt1': d_str.replace("-", "/"),
+                'ok': '確定',
+            }
             
-            for d in date_range_list:
-                url = 'https://epower.ga.ntu.edu.tw/fn4/report2.aspx'
-                payload = {
-                    'ctg': ctg,
-                    'dt1': d,
-                    'ok': '確定',
-                }
-                try:
-                    read_url = requests.post(url, data=payload)
-                    dfs = pd.read_html(StringIO(read_url.text))
-                    if len(dfs) > 1:
-                        data = dfs[1]
-                        data_temp = data.copy()
-                        data_temp.columns = data_temp.iloc[1]
-                        data_temp = data_temp.iloc[3:27]
-                        if b_val in data_temp.columns:
-                            data_temp = data_temp[b_val]
-                            data_temp = [float(val) if val != '---' else np.nan for val in data_temp]
-                            data_output += data_temp
-                        else:
-                            data_output += [np.nan] * 24
+            day_values = []
+            try:
+                read_url = requests.post(url, data=payload)
+                dfs = pd.read_html(StringIO(read_url.text))
+                if len(dfs) > 1:
+                    data = dfs[1]
+                    data_temp = data.copy()
+                    data_temp.columns = data_temp.iloc[1]
+                    data_temp = data_temp.iloc[3:27]
+                    if b_val in data_temp.columns:
+                        col_data = data_temp[b_val]
+                        day_values = [float(val) if val != '---' else np.nan for val in col_data]
                     else:
-                        data_output += [np.nan] * 24
-                except Exception as req_e:
-                    # print(f"Request error: {req_e}")
-                    data_output += [np.nan] * 24
-                
-                time.sleep(0.05)
+                        day_values = [np.nan] * 24
+                else:
+                    day_values = [np.nan] * 24
+            except Exception as req_e:
+                day_values = [np.nan] * 24
             
-            # Create Series for new data
-            new_idx = pd.date_range(start=start_date, end=end_date + timedelta(hours=23), freq='h')
+            for h in range(24):
+                ts = d_obj + timedelta(hours=h)
+                val = day_values[h] if h < len(day_values) else np.nan
+                new_data_dict[ts] = val
             
-            if len(data_output) != len(new_idx):
-                 if len(data_output) < len(new_idx):
-                     data_output.extend([np.nan] * (len(new_idx) - len(data_output)))
-                 else:
-                     data_output = data_output[:len(new_idx)]
-            
-            new_series = pd.Series(data_output, index=new_idx, name=b_val)
-            
-            # Add to manager
-            manager.add_data(campus, feeder, subject, b_val, new_series)
+            time.sleep(request_sleep_interval)
 
-        except Exception as e:
-            print(f"\nFailed to process {b_val}: {e}")
+        # Step 4: Write back results (Critical Section)
+        if new_data_dict:
+            new_series = pd.Series(new_data_dict)
+            new_series.name = b_val
+            with manager_lock:
+                manager.add_data(campus, feeder, subject, b_val, new_series)
 
-    # Save all accumulated data
-    manager.save_all()
+    # Process using ThreadPool
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(process_single_building, b[0], b[1]): b[0] for b in all_buildings}
+        
+        for future in as_completed(futures):
+            b_name = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                print(f"\nFailed to process {b_name}: {e}")
+            
+            with print_lock:
+                processed_count += 1
+                # Print on new line to ensure visibility
+                print(f"[{processed_count}/{total_buildings}] Processed {b_name}")
+
+            # SAVE IMMEDIATELY after each building finishes
+            with manager_lock:
+                manager.save_all()
+
     print("\n>>> Buildings Update Finished.")
 
 def update_meters(force_start=None, force_end=None):
